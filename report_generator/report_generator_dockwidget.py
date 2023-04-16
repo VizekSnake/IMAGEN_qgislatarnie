@@ -24,15 +24,27 @@
 
 import os
 
+from qgis.PyQt.QtWidgets import QLineEdit, QPushButton, QGroupBox, QLabel, QWidget, QVBoxLayout, QMessageBox
 from qgis.PyQt import QtGui, QtWidgets, uic
 from qgis.PyQt.QtCore import pyqtSignal
+from fpdf import FPDF
+from reportlab.lib.units import inch
+from PyQt5.QtWidgets import QCheckBox
+
+from .authentication import Authentication
+from qgis.PyQt.QtWidgets import QFileDialog
+
+from qgis.core import *
+import csv
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+import os
 
 FORM_CLASS, _ = uic.loadUiType(os.path.join(
     os.path.dirname(__file__), 'report_generator_dockwidget_base.ui'))
 
 
 class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
-
     closingPlugin = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -44,6 +56,218 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         # http://doc.qt.io/qt-5/designer-using-a-ui-file.html
         # #widgets-and-dialogs-with-auto-connect
         self.setupUi(self)
+
+        self.username_input = self.findChild(QLineEdit, 'username_input')
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input = self.findChild(QLineEdit, 'password_input')
+
+        # Find the login_box
+        self.login_box = self.findChild(QGroupBox, 'Login_box')
+
+        # Create the plugin options and logout button (initially hidden)
+        self.plugin_options = QLabel("Plugin options go here...")
+        self.plugin_options.setMaximumHeight(100)
+        # self.logout_button = QPushButton("Logout")
+        self.plugin_options.setVisible(False)
+        self.logout_button.setVisible(False)
+
+        # # Connect the logout button to a function
+        # self.logout_button.clicked.connect(self.logout)
+
+        # Create a QWidget and set its layout
+        self.container_widget = QWidget()
+        self.container_layout = QVBoxLayout()
+        self.container_widget.setLayout(self.container_layout)
+
+        # Add the login_box, plugin_options, and logout_button to the container_layout
+        self.container_layout.addWidget(self.login_box)
+        # self.container_layout.addWidget(self.message_label)
+        self.container_layout.addWidget(self.plugin_options)
+        self.layer_combo_box.setVisible(False)
+        self.layer_combo_box.clear()
+        self.layer_combo_box.addItems([layer.name() for layer in QgsProject.instance().mapLayers().values()])
+
+        # Connect the "Export" button to the export method
+        self.export_button.setVisible(False)
+        self.export_button.clicked.connect(self.export_table)
+        self.container_layout.addWidget(self.export_button)
+        self.container_layout.addWidget(self.layer_combo_box)
+        self.container_layout.addWidget(self.logout_button)
+        # Populate the combo box with the names of all layers
+
+        # Set the container_widget as the central widget of the QDockWidget
+        self.setWidget(self.container_widget)
+
+        # Initially hide logout button
+        self.logout_button.setVisible(False)
+
+        # Connect the "Login" button to the login method
+        self.login_button.clicked.connect(self.login)
+
+        # Connect the "Logout" button to the logout method
+        self.logout_button.clicked.connect(self.logout)
+
+
+    def export_table(self):
+        # Get the selected layer from the combo box
+        layer_name = self.layer_combo_box.currentText()
+        layer = QgsProject.instance().mapLayersByName(layer_name)[0]
+        checked_attributes = [checkbox.text() for checkbox in self.attribute_checkboxes if checkbox.isChecked()]
+
+        # Show a file dialog to let the user choose the output file and format
+        file_name, filter = QFileDialog.getSaveFileName(self, "Export Attribute Table", f"{layer_name}_attributes",
+                                                        "CSV Files (*.csv);;PDF Files (*.pdf)")
+
+        if file_name:
+            if filter == "CSV Files (*.csv)":
+                # Export the layer's attribute table as a CSV file
+                options = QgsVectorFileWriter.SaveVectorOptions()
+                options.driverName = "CSV"
+                options.fileEncoding = "UTF-8"
+                options.layerOptions = ["GEOMETRY=AS_WKT"]
+                QgsVectorFileWriter.writeAsVectorFormat(layer, file_name, options)
+                # Show a message box to indicate success
+                QMessageBox.information(self, "Export Complete",
+                                        f"Attribute table for layer '{layer_name}' has been exported successfully as a CSV file.")
+
+
+            elif filter == "PDF Files (*.pdf)":
+
+                # Export the layer's attribute table as a CSV file
+                import os
+                csv_file_name = f"{os.path.splitext(file_name)[0]}.csv"
+
+                options = QgsVectorFileWriter.SaveVectorOptions()
+
+                options.driverName = "CSV"
+
+                options.fileEncoding = "UTF-8"
+
+                options.layerOptions = ["GEOMETRY=AS_WKT"]
+
+                QgsVectorFileWriter.writeAsVectorFormat(layer, csv_file_name, options)
+
+                # Convert the CSV file to a PDF file
+
+                pdf_file_name = f"{file_name}"
+
+                with open(csv_file_name, "r", encoding="utf-8") as csv_file:
+
+                    reader = csv.reader(csv_file)
+
+                    data = [row for row in reader]
+
+                    # Filter CSV data to include only checked attributes
+                    field_indexes = [layer.fields().lookupField(attr_name) for attr_name in checked_attributes]
+                    filtered_data = [[row[i] for i in field_indexes] for row in data]
+
+                # Calculate column widths based on maximum content width
+
+                col_widths = [max([len(str(cell)) for cell in col]) for col in zip(*data)]
+
+                col_widths = [w * 6 for w in
+                              col_widths]  # Multiply by a scaling factor (e.g., 6) to set the width in points
+
+                # Calculate table and page width
+
+                table_width = sum(col_widths)
+
+                page_width = table_width + 2 * inch  # Add some margin to the page
+
+                # Create a PDF file with the reportlab package
+
+                doc = SimpleDocTemplate(pdf_file_name, pagesize=(page_width, 11 * inch))
+
+                table = Table(filtered_data, colWidths=col_widths)
+
+                table.setStyle(TableStyle([
+
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+
+                    ('FONTSIZE', (0, 0), (-1, 0), 14),
+
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.white),
+
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+
+                ]))
+
+                doc.build([table])
+
+                # Delete the temporary CSV file
+
+                import os
+
+                os.remove(csv_file_name)
+
+                # Show a message box to indicate success
+
+                QMessageBox.information(self, "Export Complete",
+
+                                        f"Attribute table for layer '{layer_name}' has been exported successfully as a PDF file.")
+
+            # Rest of the code for login/logout methods
+
+    def login(self):
+        # Validate the credentials using the Authentication class's validate_credentials method
+        Authentication.validate_credentials(self, username=self.username_input.text(),
+                                                    password=self.password_input.text())
+        # if self.login_box.setVisible(False):
+            # # Get the selected layer from the combo box
+            # layer_name = self.layer_combo_box.currentText()
+            # layer = QgsProject.instance().mapLayersByName(layer_name)[0]
+            #
+            # # Get the attributes of the selected layer
+            # attributes = [f.name() for f in layer.fields()]
+            #
+            # # Remove all existing checkboxes
+            # for checkbox in self.findChildren(QCheckBox):
+            #     checkbox.setParent(None)
+            #
+            # # Create checkboxes dynamically based on the attributes
+            # for attribute in attributes:
+            #     checkbox = QCheckBox(attribute)
+            #     checkbox.setObjectName(attribute)
+            #     checkbox.setChecked(True)
+            #     self.container_layout.addWidget(checkbox)
+            #
+            # # Show the export button and checkboxes
+            # self.export_button.setVisible(True)
+            # self.layer_combo_box.setVisible(False)
+            # for checkbox in self.findChildren(QCheckBox):
+            #     checkbox.setVisible(True)
+
+            # Hide the login box and clear the input fields
+            # self.login_box.setVisible(False)
+            # self.username_input.setText('')
+            # self.password_input.setText('')
+            # self.username_input.setFocus()
+
+        # else:
+        #     print("Nieprawidłowe dane logowania")
+
+    def logout(self):
+        # Hide the plugin options and logout button
+        self.layer_combo_box.setVisible(False)
+        self.export_button.setVisible(False)
+        self.plugin_options.setVisible(False)
+        self.logout_button.setVisible(False)
+
+        # Show the login box and clear the input fields
+        self.login_box.setVisible(True)
+        self.username_input.setText('')
+        self.password_input.setText('')
+        self.username_input.setFocus()
+        # Show message
+        # self.message_label.setText("Wylogowano pomyślnie.")
 
     def closeEvent(self, event):
         self.closingPlugin.emit()
