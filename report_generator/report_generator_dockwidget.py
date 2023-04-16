@@ -25,11 +25,11 @@
 import os
 
 from qgis.PyQt.QtWidgets import QLineEdit, QPushButton, QGroupBox, QLabel, QWidget, QVBoxLayout, QMessageBox
-from qgis.PyQt import QtGui, QtWidgets, uic
+from qgis.PyQt import QtGui, QtWidgets, uic, QtCore
 from qgis.PyQt.QtCore import pyqtSignal
 from fpdf import FPDF
 from reportlab.lib.units import inch
-from PyQt5.QtWidgets import QCheckBox
+from PyQt5.QtWidgets import QCheckBox, QScrollArea
 
 from .authentication import Authentication
 from qgis.PyQt.QtWidgets import QFileDialog
@@ -85,7 +85,9 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         self.container_layout.addWidget(self.plugin_options)
         self.layer_combo_box.setVisible(False)
         self.layer_combo_box.clear()
-        self.layer_combo_box.addItems([layer.name() for layer in QgsProject.instance().mapLayers().values()])
+        vector_layers = [layer for layer in QgsProject.instance().mapLayers().values() if
+                         layer.type() == QgsMapLayer.VectorLayer]
+        self.layer_combo_box.addItems([layer.name() for layer in vector_layers])
 
         # Connect the "Export" button to the export method
         self.export_button.setVisible(False)
@@ -107,12 +109,16 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         # Connect the "Logout" button to the logout method
         self.logout_button.clicked.connect(self.logout)
 
+        self.attribute_checkboxes = []
+
+
 
     def export_table(self):
         # Get the selected layer from the combo box
         layer_name = self.layer_combo_box.currentText()
         layer = QgsProject.instance().mapLayersByName(layer_name)[0]
         checked_attributes = [checkbox.text() for checkbox in self.attribute_checkboxes if checkbox.isChecked()]
+        print(checked_attributes)
 
         # Show a file dialog to let the user choose the output file and format
         file_name, filter = QFileDialog.getSaveFileName(self, "Export Attribute Table", f"{layer_name}_attributes",
@@ -120,22 +126,32 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
 
         if file_name:
             if filter == "CSV Files (*.csv)":
-                # Export the layer's attribute table as a CSV file
-                options = QgsVectorFileWriter.SaveVectorOptions()
-                options.driverName = "CSV"
-                options.fileEncoding = "UTF-8"
-                options.layerOptions = ["GEOMETRY=AS_WKT"]
-                QgsVectorFileWriter.writeAsVectorFormat(layer, file_name, options)
+                # Get indexes of the checked attributes
+                field_indexes = [layer.fields().lookupField(attr_name) for attr_name in checked_attributes]
+
+                # Write the CSV file with only the checked columns
+                with open(file_name, "w", newline="", encoding="utf-8") as csv_file:
+                    writer = csv.writer(csv_file)
+                    writer.writerow(checked_attributes)  # Write header row with checked attribute names
+                    for feature in layer.getFeatures():
+                        row = [feature.attributes()[i] for i in field_indexes]
+                        writer.writerow(row)
+
                 # Show a message box to indicate success
                 QMessageBox.information(self, "Export Complete",
                                         f"Attribute table for layer '{layer_name}' has been exported successfully as a CSV file.")
 
 
+
             elif filter == "PDF Files (*.pdf)":
 
                 # Export the layer's attribute table as a CSV file
+
                 import os
+
                 csv_file_name = f"{os.path.splitext(file_name)[0]}.csv"
+
+                pdf_file_name = f"{os.path.splitext(file_name)[0]}.pdf"
 
                 options = QgsVectorFileWriter.SaveVectorOptions()
 
@@ -147,19 +163,34 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
 
                 QgsVectorFileWriter.writeAsVectorFormat(layer, csv_file_name, options)
 
-                # Convert the CSV file to a PDF file
+                # Get indexes of the checked attributes
 
-                pdf_file_name = f"{file_name}"
+                field_indexes = [layer.fields().lookupField(attr_name) for attr_name in checked_attributes]
 
-                with open(csv_file_name, "r", encoding="utf-8") as csv_file:
+                # Write the CSV file with only the checked columns
 
-                    reader = csv.reader(csv_file)
+                filtered_csv_file_name = f"{os.path.splitext(file_name)[0]}_filtered.csv"
+
+                with open(filtered_csv_file_name, "w", newline="", encoding="utf-8") as filtered_csv_file:
+
+                    writer = csv.writer(filtered_csv_file)
+
+                    writer.writerow(checked_attributes)  # Write the header row
+
+                    for feature in layer.getFeatures():
+                        row = [feature.attributes()[i] for i in field_indexes]
+
+                        writer.writerow(row)
+
+                # Read the filtered CSV file
+
+                data = []
+
+                with open(filtered_csv_file_name, "r", encoding="utf-8") as filtered_csv_file:
+
+                    reader = csv.reader(filtered_csv_file)
 
                     data = [row for row in reader]
-
-                    # Filter CSV data to include only checked attributes
-                    field_indexes = [layer.fields().lookupField(attr_name) for attr_name in checked_attributes]
-                    filtered_data = [[row[i] for i in field_indexes] for row in data]
 
                 # Calculate column widths based on maximum content width
 
@@ -178,7 +209,7 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
 
                 doc = SimpleDocTemplate(pdf_file_name, pagesize=(page_width, 11 * inch))
 
-                table = Table(filtered_data, colWidths=col_widths)
+                table = Table(data, colWidths=col_widths)
 
                 table.setStyle(TableStyle([
 
@@ -202,11 +233,11 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
 
                 doc.build([table])
 
-                # Delete the temporary CSV file
-
-                import os
+                # Delete the temporary CSV files
 
                 os.remove(csv_file_name)
+
+                os.remove(filtered_csv_file_name)
 
                 # Show a message box to indicate success
 
@@ -216,43 +247,42 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
 
             # Rest of the code for login/logout methods
 
+    def create_attribute_checkboxes(self, layer):
+        fields = layer.fields()
+
+        # Create a new widget for the checkboxes and add them to it
+        checkboxes_widget = QWidget()
+        checkboxes_layout = QVBoxLayout()
+        checkboxes_widget.setLayout(checkboxes_layout)
+        for field in fields:
+            checkbox = QCheckBox(field.name())
+            checkbox.setChecked(True)
+            self.attribute_checkboxes.append(checkbox)
+            checkboxes_layout.addWidget(checkbox)
+
+        # Create a new scroll area and set the checkboxes widget as its widget
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setMaximumHeight(200)
+        self.scroll_area.setWidget(checkboxes_widget)
+
+        # Add the scroll area to the container_layout
+        self.container_layout.addWidget(self.scroll_area)
+        self.container_layout.setAlignment(self.scroll_area, QtCore.Qt.AlignTop)
+
     def login(self):
         # Validate the credentials using the Authentication class's validate_credentials method
         Authentication.validate_credentials(self, username=self.username_input.text(),
-                                                    password=self.password_input.text())
-        # if self.login_box.setVisible(False):
-            # # Get the selected layer from the combo box
-            # layer_name = self.layer_combo_box.currentText()
-            # layer = QgsProject.instance().mapLayersByName(layer_name)[0]
-            #
-            # # Get the attributes of the selected layer
-            # attributes = [f.name() for f in layer.fields()]
-            #
-            # # Remove all existing checkboxes
-            # for checkbox in self.findChildren(QCheckBox):
-            #     checkbox.setParent(None)
-            #
-            # # Create checkboxes dynamically based on the attributes
-            # for attribute in attributes:
-            #     checkbox = QCheckBox(attribute)
-            #     checkbox.setObjectName(attribute)
-            #     checkbox.setChecked(True)
-            #     self.container_layout.addWidget(checkbox)
-            #
-            # # Show the export button and checkboxes
-            # self.export_button.setVisible(True)
-            # self.layer_combo_box.setVisible(False)
-            # for checkbox in self.findChildren(QCheckBox):
-            #     checkbox.setVisible(True)
+                                            password=self.password_input.text())
 
-            # Hide the login box and clear the input fields
-            # self.login_box.setVisible(False)
-            # self.username_input.setText('')
-            # self.password_input.setText('')
-            # self.username_input.setFocus()
+        # Get the selected layer from the combo box
+        layer_name = self.layer_combo_box.currentText()
+        layer = QgsProject.instance().mapLayersByName(layer_name)[0]
 
-        # else:
-        #     print("Nieprawidłowe dane logowania")
+        # Create the attribute checkboxes
+        self.create_attribute_checkboxes(layer)
+
+    def show_error_message(self, message):
+        QMessageBox.critical(self, "Error", message)
 
     def logout(self):
         # Hide the plugin options and logout button
@@ -261,13 +291,20 @@ class PointReportGeneratorDockWidget(QtWidgets.QDockWidget, FORM_CLASS):
         self.plugin_options.setVisible(False)
         self.logout_button.setVisible(False)
 
+        # Remove and clear attribute checkboxes and the scroll area
+        for checkbox in self.attribute_checkboxes:
+            self.container_layout.removeWidget(checkbox)
+            checkbox.setParent(None)
+        self.attribute_checkboxes.clear()
+        self.container_layout.removeWidget(self.scroll_area)
+        self.scroll_area.setVisible(False)
+
         # Show the login box and clear the input fields
         self.login_box.setVisible(True)
         self.username_input.setText('')
         self.password_input.setText('')
         self.username_input.setFocus()
-        # Show message
-        # self.message_label.setText("Wylogowano pomyślnie.")
+
 
     def closeEvent(self, event):
         self.closingPlugin.emit()
